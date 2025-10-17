@@ -1,5 +1,7 @@
 # Cosmograph-GraphML
 
+![image](image.png)
+
 `cosmograph-graphml` is a lightweight utility for visualizing GraphML files using [Cosmograph](https://cosmograph.app/), an interactive GPU-accelerated graph visualization tool.  
 It provides a simple workflow to load local or generated `.graphml` or `.gpickle` networks directly into Cosmograph in the browser.
 

@@ -33,16 +33,18 @@ def main():
 
     np.random.seed(args.seed)
     
-    outdir = Path(os.path.abspath(os.path.__file__)).parent / "public" / "data"
+    outdir = Path(__file__).parent.parent.resolve() / "public" / "data" / "mm10_merged"
     
     # --- Load graph ---
     if str(args.input).endswith(".gpickle"):
         print(f"Loading graph from {args.input} ...")
         with open(args.input, 'rb') as f:
             G = pickle.load(f)
+            
     elif str(args.input).endswith(".graphml"):
         print(f"Loading graph from {args.input} ...")
         G = nx.read_graphml(args.input)
+        
     else:
         raise ValueError(f"ERROR: File must end with '.gpickle' or '.graphml', got {args.input} instead")
             
@@ -83,6 +85,9 @@ def main():
 
     print(f"Writing positions → {pos_path}")
     point_positions.tofile(pos_path)
+    
+    print("Collecting node names...")
+    node_names = [str(n) for n in nodes]
 
     # --- Metadata for Cosmograph ---
     metadata = {
@@ -90,6 +95,7 @@ def main():
         "num_edges": int(len(edges)),
         "edges_file": os.path.basename(edges_path),
         "positions_file": os.path.basename(pos_path),
+        "names": node_names,
     }
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)

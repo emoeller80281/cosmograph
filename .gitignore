@@ -1,6 +1,8 @@
 *.graphml
 *.gpickle
 *.csv
+*.bin
+*.json
 node_modules
 npm-debug.log*
 yarn-debug.log*

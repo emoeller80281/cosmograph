@@ -1,0 +1,5 @@
+*.graphml
+*.gpickle
+*.csv
+
+!example.graphml

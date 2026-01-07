@@ -63,11 +63,44 @@ def main():
     # --- Map node names to numeric indices ---
     nodes = list(G.nodes())
     node_to_idx = {n: i for i, n in enumerate(nodes)}
+    
+    # --- Split edges by type if edge_type attribute exists ---
+    trajectory_edges = []
+    similarity_edges = []
+    has_edge_types = False
+    
+    for u, v, data in G.edges(data=True):
+        edge_type = data.get('edge_type', 'trajectory')
+        if edge_type == 'attractor_similarity':
+            similarity_edges.append((u, v))
+            has_edge_types = True
+        else:
+            trajectory_edges.append((u, v))
+    
+    # If no edge types, use all edges as trajectory
+    if not has_edge_types:
+        trajectory_edges = list(edges)
+        similarity_edges = []
+    
+    print(f"Edge breakdown: {len(trajectory_edges)} trajectory, {len(similarity_edges)} similarity")
+    
+    # --- Encode all edges (combined) ---
     edges_idx = np.empty(len(edges) * 2, dtype=np.float32)
-
     for i, (u, v) in enumerate(edges):
         edges_idx[i * 2] = node_to_idx[u]
         edges_idx[i * 2 + 1] = node_to_idx[v]
+    
+    # --- Encode trajectory edges separately ---
+    traj_edges_idx = np.empty(len(trajectory_edges) * 2, dtype=np.float32)
+    for i, (u, v) in enumerate(trajectory_edges):
+        traj_edges_idx[i * 2] = node_to_idx[u]
+        traj_edges_idx[i * 2 + 1] = node_to_idx[v]
+    
+    # --- Encode similarity edges separately ---
+    sim_edges_idx = np.empty(len(similarity_edges) * 2, dtype=np.float32)
+    for i, (u, v) in enumerate(similarity_edges):
+        sim_edges_idx[i * 2] = node_to_idx[u]
+        sim_edges_idx[i * 2 + 1] = node_to_idx[v]
 
     # --- Generate node positions (random init; Cosmograph will simulate layout) ---
     print("Generating random node positions...")
@@ -77,12 +110,21 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     base = os.path.splitext(os.path.basename(args.input))[0]
     edges_path = os.path.join(outdir, f"{base}_edges.bin")
+    traj_edges_path = os.path.join(outdir, f"{base}_edges_trajectory.bin")
+    sim_edges_path = os.path.join(outdir, f"{base}_edges_similarity.bin")
     pos_path = os.path.join(outdir, f"{base}_positions.bin")
     meta_path = os.path.join(outdir, f"{base}_metadata.json")
 
     # --- Write binaries ---
     print(f"Writing edges → {edges_path}")
     edges_idx.tofile(edges_path)
+    
+    if has_edge_types:
+        print(f"Writing trajectory edges → {traj_edges_path}")
+        traj_edges_idx.tofile(traj_edges_path)
+        
+        print(f"Writing similarity edges → {sim_edges_path}")
+        sim_edges_idx.tofile(sim_edges_path)
 
     print(f"Writing positions → {pos_path}")
     point_positions.tofile(pos_path)
@@ -92,10 +134,15 @@ def main():
     # Collect pseudotime per node if available; ensure alignment with `nodes` order
     pseudotime = []
     attractor_sizes = []
+    condition_bias = []
+    disease_regions = []
     have_pseudotime = False
+    have_condition_bias = False
     for n in nodes:
         pt = None
         asize = 0
+        cbias = None
+        dregion = None
         try:
             # NetworkX may store attributes as strings from GraphML; coerce to float
             attr = G.nodes[n]
@@ -104,17 +151,31 @@ def main():
                 have_pseudotime = True
             if "attractor_size" in attr and attr["attractor_size"] is not None:
                 asize = int(float(attr["attractor_size"]))
+            if "condition_bias" in attr and attr["condition_bias"] is not None:
+                cbias = float(attr["condition_bias"])
+                have_condition_bias = True
+            if "disease_region" in attr and attr["disease_region"] is not None:
+                dregion = str(attr["disease_region"])
         except Exception:
             pt = None
             asize = 0
+            cbias = None
+            dregion = None
         pseudotime.append(pt)
         attractor_sizes.append(asize)
+        condition_bias.append(cbias)
+        disease_regions.append(dregion)
 
     # --- Metadata for Cosmograph ---
     metadata = {
         "num_nodes": int(num_nodes),
         "num_edges": int(len(edges)),
+        "num_trajectory_edges": int(len(trajectory_edges)),
+        "num_similarity_edges": int(len(similarity_edges)),
+        "has_edge_types": has_edge_types,
         "edges_file": os.path.basename(edges_path),
+        "trajectory_edges_file": os.path.basename(traj_edges_path) if has_edge_types else None,
+        "similarity_edges_file": os.path.basename(sim_edges_path) if has_edge_types else None,
         "positions_file": os.path.basename(pos_path),
         "names": node_names,
         "attractor_sizes": attractor_sizes,
@@ -137,6 +198,17 @@ def main():
         metadata["pseudotime_norm"] = [_norm(p) for p in pseudotime]
         metadata["pseudotime_min"] = pt_min
         metadata["pseudotime_max"] = pt_max
+    
+    if have_condition_bias:
+        # Normalize condition_bias from [-1,1] to [0,1] for coloring
+        def _norm_bias(b):
+            if b is None:
+                return None
+            return (float(b) + 1.0) / 2.0  # Map -1..1 to 0..1
+        metadata["condition_bias_raw"] = condition_bias
+        metadata["condition_bias_norm"] = [_norm_bias(b) for b in condition_bias]
+        metadata["disease_regions"] = disease_regions
+    
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
 

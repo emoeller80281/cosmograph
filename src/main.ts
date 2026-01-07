@@ -7,7 +7,7 @@ import './style.css'
 async function loadCosmographData(
   dir: string,
   baseName: string
-): Promise<{ links: Float32Array; pointPositions: Float32Array; meta: any }> {
+): Promise<{ links: Float32Array; pointPositions: Float32Array; meta: any; trajectoryLinks?: Float32Array; similarityLinks?: Float32Array }> {
   const jsonPath = `${dir}${baseName}_metadata.json`
   const meta = await fetch(jsonPath).then(r => r.json())
 
@@ -22,13 +22,32 @@ async function loadCosmographData(
   const links = new Float32Array(edgesBuf)
   const pointPositions = new Float32Array(posBuf)
 
+  // Try to load separate edge files if available
+  let trajectoryLinks: Float32Array | undefined
+  let similarityLinks: Float32Array | undefined
+  
+  try {
+    const trajPath = `${dir}${baseName}_edges_trajectory.bin`
+    const simPath = `${dir}${baseName}_edges_similarity.bin`
+    const [trajBuf, simBuf] = await Promise.all([
+      fetch(trajPath).then(r => r.ok ? r.arrayBuffer() : null).catch(() => null),
+      fetch(simPath).then(r => r.ok ? r.arrayBuffer() : null).catch(() => null),
+    ])
+    if (trajBuf) trajectoryLinks = new Float32Array(trajBuf)
+    if (simBuf) similarityLinks = new Float32Array(simBuf)
+  } catch (e) {
+    // Fall back to combined edges
+  }
+
   console.log(
     `Loaded ${meta.num_nodes ?? pointPositions.length / 2} nodes and ${
       meta.num_edges ?? links.length / 2
     } edges`
   )
+  if (trajectoryLinks) console.log(`  - ${trajectoryLinks.length / 2} trajectory edges`)
+  if (similarityLinks) console.log(`  - ${similarityLinks.length / 2} similarity edges`)
 
-  return { links, pointPositions, meta }
+  return { links, pointPositions, meta, trajectoryLinks, similarityLinks }
 }
 
 /**
@@ -84,7 +103,15 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   let ptColors: Float32Array | null = null
   let uniformColors: Float32Array | null = null
   let originalLinks: Float32Array | null = null
+  let trajectoryLinks: Float32Array | null = null
+  let similarityLinks: Float32Array | null = null
   let minAttractorSize = 0
+  let showTrajectoryEdges = true
+  let showSimilarityEdges = true
+  let linkWidth = 0.4
+  type ColorMode = 'pseudotime' | 'condition_bias' | 'uniform'
+  let colorMode: ColorMode = 'pseudotime'
+  let conditionBiasColors: Float32Array | null = null
 
   function rgba(hex: string): [number, number, number, number] {
     // '#RRGGBBAA' or '#RRGGBB'
@@ -132,13 +159,20 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     const darkBase = rgba('#00ff00ff') // vivid green on dark
     const lightBase = rgba('#000000ff') // black on light
     
-    if (colorByPT && ptColors) {
+    if (colorMode === 'pseudotime' && ptColors) {
       // @ts-ignore
       if (typeof (graph as any).setPointColors === 'function') {
         // @ts-ignore
         ;(graph as any).setPointColors(ptColors)
       }
+    } else if (colorMode === 'condition_bias' && conditionBiasColors) {
+      // @ts-ignore
+      if (typeof (graph as any).setPointColors === 'function') {
+        // @ts-ignore
+        ;(graph as any).setPointColors(conditionBiasColors)
+      }
     } else {
+      // Uniform coloring
       const base = isDark ? darkBase : lightBase
       uniformColors = makeUniformColors(N, base)
       // @ts-ignore
@@ -152,21 +186,48 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   // --- Color by pseudotime toggle ---
   const colorCtl = document.createElement('div')
   colorCtl.className = 'action'
-  const colorChk = document.createElement('input')
-  colorChk.type = 'checkbox'
-  colorChk.checked = true
-  colorChk.id = 'color-by-pt'
-  const colorLbl = document.createElement('label')
-  colorLbl.htmlFor = 'color-by-pt'
-  colorLbl.textContent = 'Color by pseudotime'
-  colorLbl.style.marginLeft = '8px'
-  colorChk.addEventListener('change', () => {
-    colorByPT = colorChk.checked
-    applyColoring()
-    graph.render()
-  })
-  colorCtl.appendChild(colorChk)
-  colorCtl.appendChild(colorLbl)
+  colorCtl.style.display = 'flex'
+  colorCtl.style.flexDirection = 'column'
+  colorCtl.style.gap = '4px'
+  
+  const colorLabel = document.createElement('label')
+  colorLabel.textContent = 'Color by:'
+  colorLabel.style.fontWeight = 'bold'
+  colorCtl.appendChild(colorLabel)
+  
+  const colorModes: Array<{value: ColorMode, label: string}> = [
+    { value: 'pseudotime', label: 'Pseudotime' },
+    { value: 'condition_bias', label: 'Condition bias (Healthy↔HIV)' },
+    { value: 'uniform', label: 'Uniform color' }
+  ]
+  
+  for (const mode of colorModes) {
+    const radioWrapper = document.createElement('div')
+    const radio = document.createElement('input')
+    radio.type = 'radio'
+    radio.name = 'color-mode'
+    radio.value = mode.value
+    radio.id = `color-${mode.value}`
+    radio.checked = colorMode === mode.value
+    
+    const label = document.createElement('label')
+    label.htmlFor = `color-${mode.value}`
+    label.textContent = mode.label
+    label.style.marginLeft = '6px'
+    
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        colorMode = mode.value
+        applyColoring()
+        graph.render()
+      }
+    })
+    
+    radioWrapper.appendChild(radio)
+    radioWrapper.appendChild(label)
+    colorCtl.appendChild(radioWrapper)
+  }
+  
   actionsDiv.appendChild(colorCtl)
 
   // --- Theme toggle ---
@@ -187,6 +248,71 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   themeCtl.appendChild(themeChk)
   themeCtl.appendChild(themeLbl)
   actionsDiv.appendChild(themeCtl)
+
+  // --- Link width control ---
+  const linkWidthCtl = document.createElement('div')
+  linkWidthCtl.className = 'action'
+  const linkWidthLabel = document.createElement('label')
+  linkWidthLabel.textContent = 'Link width'
+  linkWidthLabel.style.marginRight = '8px'
+  const linkWidthInput = document.createElement('input')
+  linkWidthInput.type = 'range'
+  linkWidthInput.min = '0.1'
+  linkWidthInput.max = '5'
+  linkWidthInput.step = '0.1'
+  linkWidthInput.value = '0.4'
+  linkWidthInput.style.verticalAlign = 'middle'
+  const linkWidthValue = document.createElement('span')
+  linkWidthValue.textContent = '0.4'
+  linkWidthValue.style.marginLeft = '8px'
+  linkWidthInput.addEventListener('input', () => {
+    const v = Number(linkWidthInput.value)
+    linkWidthValue.textContent = v.toFixed(1)
+    linkWidth = v
+    graph.setConfig({ linkWidth: v })
+    graph.render()
+  })
+  linkWidthCtl.appendChild(linkWidthLabel)
+  linkWidthCtl.appendChild(linkWidthInput)
+  linkWidthCtl.appendChild(linkWidthValue)
+  actionsDiv.appendChild(linkWidthCtl)
+
+  // --- Toggle edge types ---
+  const trajEdgeCtl = document.createElement('div')
+  trajEdgeCtl.className = 'action'
+  const trajEdgeChk = document.createElement('input')
+  trajEdgeChk.type = 'checkbox'
+  trajEdgeChk.checked = true
+  trajEdgeChk.id = 'show-traj-edges'
+  const trajEdgeLbl = document.createElement('label')
+  trajEdgeLbl.htmlFor = 'show-traj-edges'
+  trajEdgeLbl.textContent = 'Show trajectory edges'
+  trajEdgeLbl.style.marginLeft = '8px'
+  trajEdgeChk.addEventListener('change', () => {
+    showTrajectoryEdges = trajEdgeChk.checked
+    applyFiltering()
+  })
+  trajEdgeCtl.appendChild(trajEdgeChk)
+  trajEdgeCtl.appendChild(trajEdgeLbl)
+  actionsDiv.appendChild(trajEdgeCtl)
+
+  const simEdgeCtl = document.createElement('div')
+  simEdgeCtl.className = 'action'
+  const simEdgeChk = document.createElement('input')
+  simEdgeChk.type = 'checkbox'
+  simEdgeChk.checked = true
+  simEdgeChk.id = 'show-sim-edges'
+  const simEdgeLbl = document.createElement('label')
+  simEdgeLbl.htmlFor = 'show-sim-edges'
+  simEdgeLbl.textContent = 'Show similarity edges'
+  simEdgeLbl.style.marginLeft = '8px'
+  simEdgeChk.addEventListener('change', () => {
+    showSimilarityEdges = simEdgeChk.checked
+    applyFiltering()
+  })
+  simEdgeCtl.appendChild(simEdgeChk)
+  simEdgeCtl.appendChild(simEdgeLbl)
+  actionsDiv.appendChild(simEdgeCtl)
 
   // --- Filter by attractor size ---
   const filterCtl = document.createElement('div')
@@ -284,19 +410,37 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     
     const numNodes = Math.floor(pointPositions.length / 2)
     
-    // Find connected components in the original graph
-    const nodeToComponentSize = findConnectedComponents(numNodes, originalLinks)
+    // Build edge list based on user toggles
+    let activeEdges = originalLinks
+    if (trajectoryLinks && similarityLinks) {
+      const combined: number[] = []
+      if (showTrajectoryEdges) {
+        for (let i = 0; i < trajectoryLinks.length; i++) {
+          combined.push(trajectoryLinks[i])
+        }
+      }
+      if (showSimilarityEdges) {
+        for (let i = 0; i < similarityLinks.length; i++) {
+          combined.push(similarityLinks[i])
+        }
+      }
+      activeEdges = new Float32Array(combined)
+      console.log(`Active edges: ${activeEdges.length / 2} (traj: ${showTrajectoryEdges ? trajectoryLinks.length / 2 : 0}, sim: ${showSimilarityEdges ? similarityLinks.length / 2 : 0})`)
+    }
+    
+    // Find connected components in the active graph
+    const nodeToComponentSize = findConnectedComponents(numNodes, activeEdges)
     
     // Filter edges: keep only edges where both nodes are in large enough components
     const filteredEdges: number[] = []
-    for (let i = 0; i < originalLinks.length; i += 2) {
-      const src = Math.floor(originalLinks[i])
-      const dst = Math.floor(originalLinks[i + 1])
+    for (let i = 0; i < activeEdges.length; i += 2) {
+      const src = Math.floor(activeEdges[i])
+      const dst = Math.floor(activeEdges[i + 1])
       const srcSize = nodeToComponentSize.get(src) || 0
       const dstSize = nodeToComponentSize.get(dst) || 0
       
       if (srcSize >= minAttractorSize && dstSize >= minAttractorSize) {
-        filteredEdges.push(originalLinks[i], originalLinks[i + 1])
+        filteredEdges.push(activeEdges[i], activeEdges[i + 1])
       }
     }
     
@@ -313,8 +457,21 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     const darkBase = rgba('#00ff00ff')
     const lightBase = rgba('#000000ff')
     
-    if (colorByPT && ptColors) {
+    if (colorMode === 'pseudotime' && ptColors) {
       const filtered = new Float32Array(ptColors)
+      for (let i = 0; i < N; i++) {
+        const size = nodeToComponentSize.get(i) || 0
+        if (size < minAttractorSize) {
+          filtered[i * 4 + 3] = 0
+        }
+      }
+      // @ts-ignore
+      if (typeof (graph as any).setPointColors === 'function') {
+        // @ts-ignore
+        ;(graph as any).setPointColors(filtered)
+      }
+    } else if (colorMode === 'condition_bias' && conditionBiasColors) {
+      const filtered = new Float32Array(conditionBiasColors)
       for (let i = 0; i < N; i++) {
         const size = nodeToComponentSize.get(i) || 0
         if (size < minAttractorSize) {
@@ -390,11 +547,19 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   })
 
   // --- Load edges and positions ---
-  // Load STG output converted to Cosmograph binaries
+  // Load STG output with similarity edges
   // To generate these, run:
-  //   python src/convert_graph_to_binary_pairs.py --input /absolute/path/to/stg_graph.graphml
-  const { links, pointPositions, meta } = await loadCosmographData('/data/mm10_merged/', 'stg_graph')
+  //   python src/convert_graph_to_binary_pairs.py --input /absolute/path/to/stg_graph_with_similarity.graphml
+  const { links, pointPositions, meta, trajectoryLinks: tLinks, similarityLinks: sLinks } = await loadCosmographData('/data/mm10_merged/', 'stg_graph_with_similarity')
   originalLinks = links
+  trajectoryLinks = tLinks || null
+  similarityLinks = sLinks || null
+  
+  console.log('Edge arrays loaded:')
+  console.log('  Total edges:', originalLinks?.length / 2)
+  console.log('  Trajectory edges:', trajectoryLinks?.length ? trajectoryLinks.length / 2 : 'none')
+  console.log('  Similarity edges:', similarityLinks?.length ? similarityLinks.length / 2 : 'none')
+  
   graph.setPointPositions(pointPositions)
   graph.setLinks(links)
   // Ensure simulation runs at least once to bring points into view
@@ -417,12 +582,28 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
       colors[o + 3] = a / 255
     }
     ptColors = colors
-    applyColoring()
   }
-  else {
-    // No pseudotime; default to uniform according to theme
-    applyColoring()
+  
+  // If condition_bias is present, compute separate color array
+  const cb: Array<number | null> | undefined = meta.condition_bias_norm || undefined
+  if (cb && Array.isArray(cb)) {
+    const N = Math.floor(pointPositions.length / 2)
+    const colors = new Float32Array((cb.length || N) * 4)
+    const n = cb.length
+    for (let i = 0; i < n; i++) {
+      const biasNorm = cb[i] == null ? null : Math.max(0, Math.min(1, Number(cb[i])))
+      // Blue (Healthy=-1) -> White (Mixed=0) -> Red (HIV=+1)
+      const [r, g, b, a] = biasNorm == null ? [255, 220, 40, 255] : lerpHealthyHIV(biasNorm)
+      const o = i * 4
+      colors[o] = r / 255
+      colors[o + 1] = g / 255
+      colors[o + 2] = b / 255
+      colors[o + 3] = a / 255
+    }
+    conditionBiasColors = colors
   }
+  
+  applyColoring()
   graph.fitView()
   graph.render()
 
@@ -557,5 +738,17 @@ function lerpBlueRed(t: number): [number, number, number, number] {
   const r = Math.round(lb[0] + (hb[0] - lb[0]) * t)
   const g = Math.round(lb[1] + (hb[1] - lb[1]) * t)
   const b = Math.round(lb[2] + (hb[2] - lb[2]) * t)
+  return [r, g, b, 255]
+}
+
+function lerpHealthyHIV(t: number): [number, number, number, number] {
+  // Blue (Healthy, -1) -> Red (HIV, +1)
+  // t=0 (bias=-1, Healthy): #377eb8 (55,126,184)
+  // t=1 (bias=+1, HIV): #e41a1c (228,26,28)
+  const blue = [55, 126, 184]
+  const red = [228, 26, 28]
+  const r = Math.round(blue[0] + (red[0] - blue[0]) * t)
+  const g = Math.round(blue[1] + (red[1] - blue[1]) * t)
+  const b = Math.round(blue[2] + (red[2] - blue[2]) * t)
   return [r, g, b, 255]
 }

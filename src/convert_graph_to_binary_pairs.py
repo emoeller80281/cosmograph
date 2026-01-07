@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
 convert_gpickle_to_bin.py
-Convert a NetworkX .gpickle graph to binary arrays for Cosmograph.
+Convert a NetworkX .gpickle or .graphml graph to binary arrays for Cosmograph.
 
-Outputs:
-  - edges.bin: Float32Array of [src, dst, src, dst, ...]
-  - positions.bin: Float32Array of [x, y, x, y, ...]
-  - metadata.json: node_count, edge_count, paths to binaries
+Outputs (written under public/data/mm10_merged by default):
+    - <base>_edges.bin: Float32Array of [src, dst, src, dst, ...]
+    - <base>_positions.bin: Float32Array of [x, y, x, y, ...]
+    - <base>_metadata.json: node_count, edge_count, names, optional pseudotime per node
 
 Usage:
-  python src/convert_gpickle_to_bin.py \
-      --input /path/to/string_mouse_full.gpickle \
-      --outdir public/data \
-      --sample 100000
+    python src/convert_gpickle_to_bin.py \
+            --input /absolute/path/to/stg_graph.graphml \
+            --sample 100000
 """
 
 import argparse
@@ -24,7 +23,7 @@ import pickle
 from pathlib import Path
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert NetworkX gpickle to Cosmograph binaries.")
+    parser = argparse.ArgumentParser(description="Convert NetworkX gpickle/graphml to Cosmograph binaries.")
     parser.add_argument("--input", required=True, help="Input .gpickle file")
     parser.add_argument("--sample", type=int, default=None,
                         help="Optional random sample of edges for visualization")
@@ -55,6 +54,8 @@ def main():
     # --- Sample edges if requested ---
     edges = np.array(list(G.edges()), dtype=object)
     if args.sample and args.sample < len(edges):
+        print(f"WARNING: Sampling edges will break STG structure (orphan nodes)!")
+        print(f"For State Transition Graphs, do NOT use --sample.")
         print(f"Sampling {args.sample:,} edges for visualization...")
         idx = np.random.choice(len(edges), args.sample, replace=False)
         edges = edges[idx]
@@ -68,7 +69,7 @@ def main():
         edges_idx[i * 2] = node_to_idx[u]
         edges_idx[i * 2 + 1] = node_to_idx[v]
 
-    # --- Generate node positions (random or layout) ---
+    # --- Generate node positions (random init; Cosmograph will simulate layout) ---
     print("Generating random node positions...")
     point_positions = np.random.uniform(-1.0, 1.0, size=(num_nodes * 2)).astype(np.float32)
 
@@ -86,8 +87,28 @@ def main():
     print(f"Writing positions → {pos_path}")
     point_positions.tofile(pos_path)
     
-    print("Collecting node names...")
+    print("Collecting node names and attributes (pseudotime if present)...")
     node_names = [str(n) for n in nodes]
+    # Collect pseudotime per node if available; ensure alignment with `nodes` order
+    pseudotime = []
+    attractor_sizes = []
+    have_pseudotime = False
+    for n in nodes:
+        pt = None
+        asize = 0
+        try:
+            # NetworkX may store attributes as strings from GraphML; coerce to float
+            attr = G.nodes[n]
+            if "pseudotime" in attr and attr["pseudotime"] is not None:
+                pt = float(attr["pseudotime"])  # may raise ValueError which we ignore
+                have_pseudotime = True
+            if "attractor_size" in attr and attr["attractor_size"] is not None:
+                asize = int(float(attr["attractor_size"]))
+        except Exception:
+            pt = None
+            asize = 0
+        pseudotime.append(pt)
+        attractor_sizes.append(asize)
 
     # --- Metadata for Cosmograph ---
     metadata = {
@@ -96,7 +117,26 @@ def main():
         "edges_file": os.path.basename(edges_path),
         "positions_file": os.path.basename(pos_path),
         "names": node_names,
+        "attractor_sizes": attractor_sizes,
     }
+    if have_pseudotime:
+        # Normalize pseudotime to [0,1] if possible for convenience, keep original too
+        valid_pts = [p for p in pseudotime if p is not None]
+        if valid_pts:
+            pt_min = float(min(valid_pts))
+            pt_max = float(max(valid_pts))
+        else:
+            pt_min, pt_max = 0.0, 1.0
+        def _norm(p):
+            if p is None:
+                return None
+            if pt_max == pt_min:
+                return 1.0
+            return (float(p) - pt_min) / (pt_max - pt_min)
+        metadata["pseudotime_raw"] = pseudotime
+        metadata["pseudotime_norm"] = [_norm(p) for p in pseudotime]
+        metadata["pseudotime_min"] = pt_min
+        metadata["pseudotime_max"] = pt_max
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
 

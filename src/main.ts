@@ -52,6 +52,297 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   actionsHeader.textContent = 'Actions'
   actionsDiv.appendChild(actionsHeader)
 
+  // --- Point size control ---
+  const sizeControl = document.createElement('div')
+  sizeControl.className = 'action'
+  const sizeLabel = document.createElement('label')
+  sizeLabel.textContent = 'Point size'
+  sizeLabel.style.marginRight = '8px'
+  const sizeInput = document.createElement('input')
+  sizeInput.type = 'range'
+  sizeInput.min = '1'
+  sizeInput.max = '40'
+  sizeInput.value = '14'
+  sizeInput.style.verticalAlign = 'middle'
+  const sizeValue = document.createElement('span')
+  sizeValue.textContent = '14'
+  sizeValue.style.marginLeft = '8px'
+  sizeInput.addEventListener('input', () => {
+    const v = Number(sizeInput.value)
+    sizeValue.textContent = String(v)
+    graph.setConfig({ pointSize: v })
+    graph.render()
+  })
+  sizeControl.appendChild(sizeLabel)
+  sizeControl.appendChild(sizeInput)
+  sizeControl.appendChild(sizeValue)
+  actionsDiv.appendChild(sizeControl)
+
+  // State for theme and coloring
+  let isDark = true
+  let colorByPT = true
+  let ptColors: Float32Array | null = null
+  let uniformColors: Float32Array | null = null
+  let originalLinks: Float32Array | null = null
+  let minAttractorSize = 0
+
+  function rgba(hex: string): [number, number, number, number] {
+    // '#RRGGBBAA' or '#RRGGBB'
+    const h = hex.replace('#', '')
+    const r = parseInt(h.slice(0, 2), 16)
+    const g = parseInt(h.slice(2, 4), 16)
+    const b = parseInt(h.slice(4, 6), 16)
+    const a = h.length >= 8 ? parseInt(h.slice(6, 8), 16) : 255
+    return [r, g, b, a]
+  }
+
+  function makeUniformColors(n: number, color: [number, number, number, number]): Float32Array {
+    const arr = new Float32Array(n * 4)
+    for (let i = 0; i < n; i++) {
+      const o = i * 4
+      arr[o] = color[0] / 255
+      arr[o + 1] = color[1] / 255
+      arr[o + 2] = color[2] / 255
+      arr[o + 3] = color[3] / 255
+    }
+    return arr
+  }
+
+  function applyTheme(): void {
+    if (isDark) {
+      graph.setConfig({
+        backgroundColor: '#0D1117ff',
+        linkColor: '#6b728033',
+        hoveredPointRingColor: '#4B5BBF',
+      })
+    } else {
+      graph.setConfig({
+        backgroundColor: '#ffffffff',
+        linkColor: '#43434334',
+        hoveredPointRingColor: '#3b82f6',
+      })
+    }
+    // Re-apply colors to respect theme if using uniform colors
+    applyColoring()
+    graph.render()
+  }
+
+  function applyColoring(): void {
+    const N = Math.floor(pointPositions.length / 2)
+    const darkBase = rgba('#00ff00ff') // vivid green on dark
+    const lightBase = rgba('#000000ff') // black on light
+    
+    if (colorByPT && ptColors) {
+      // @ts-ignore
+      if (typeof (graph as any).setPointColors === 'function') {
+        // @ts-ignore
+        ;(graph as any).setPointColors(ptColors)
+      }
+    } else {
+      const base = isDark ? darkBase : lightBase
+      uniformColors = makeUniformColors(N, base)
+      // @ts-ignore
+      if (typeof (graph as any).setPointColors === 'function') {
+        // @ts-ignore
+        ;(graph as any).setPointColors(uniformColors)
+      }
+    }
+  }
+
+  // --- Color by pseudotime toggle ---
+  const colorCtl = document.createElement('div')
+  colorCtl.className = 'action'
+  const colorChk = document.createElement('input')
+  colorChk.type = 'checkbox'
+  colorChk.checked = true
+  colorChk.id = 'color-by-pt'
+  const colorLbl = document.createElement('label')
+  colorLbl.htmlFor = 'color-by-pt'
+  colorLbl.textContent = 'Color by pseudotime'
+  colorLbl.style.marginLeft = '8px'
+  colorChk.addEventListener('change', () => {
+    colorByPT = colorChk.checked
+    applyColoring()
+    graph.render()
+  })
+  colorCtl.appendChild(colorChk)
+  colorCtl.appendChild(colorLbl)
+  actionsDiv.appendChild(colorCtl)
+
+  // --- Theme toggle ---
+  const themeCtl = document.createElement('div')
+  themeCtl.className = 'action'
+  const themeChk = document.createElement('input')
+  themeChk.type = 'checkbox'
+  themeChk.checked = true
+  themeChk.id = 'theme-dark'
+  const themeLbl = document.createElement('label')
+  themeLbl.htmlFor = 'theme-dark'
+  themeLbl.textContent = 'Dark theme'
+  themeLbl.style.marginLeft = '8px'
+  themeChk.addEventListener('change', () => {
+    isDark = themeChk.checked
+    applyTheme()
+  })
+  themeCtl.appendChild(themeChk)
+  themeCtl.appendChild(themeLbl)
+  actionsDiv.appendChild(themeCtl)
+
+  // --- Filter by attractor size ---
+  const filterCtl = document.createElement('div')
+  filterCtl.className = 'action'
+  const filterLabel = document.createElement('label')
+  filterLabel.textContent = 'Min component size'
+  filterLabel.style.marginRight = '8px'
+  const filterInput = document.createElement('input')
+  filterInput.type = 'range'
+  filterInput.min = '1'
+  filterInput.max = '500'
+  filterInput.value = '1'
+  filterInput.step = '1'
+  filterInput.style.verticalAlign = 'middle'
+  const filterValue = document.createElement('span')
+  filterValue.textContent = '1'
+  filterValue.style.marginLeft = '8px'
+  filterInput.addEventListener('input', () => {
+    const v = Number(filterInput.value)
+    filterValue.textContent = String(v)
+    minAttractorSize = v
+    applyFiltering()
+  })
+  filterCtl.appendChild(filterLabel)
+  filterCtl.appendChild(filterInput)
+  filterCtl.appendChild(filterValue)
+  actionsDiv.appendChild(filterCtl)
+
+  function findConnectedComponents(numNodes: number, edgeList: Float32Array): Map<number, number> {
+    // Build adjacency list (undirected for component analysis)
+    const adj = new Map<number, Set<number>>()
+    for (let i = 0; i < edgeList.length; i += 2) {
+      const src = Math.floor(edgeList[i])
+      const dst = Math.floor(edgeList[i + 1])
+      if (!adj.has(src)) adj.set(src, new Set())
+      if (!adj.has(dst)) adj.set(dst, new Set())
+      adj.get(src)!.add(dst)
+      adj.get(dst)!.add(src)
+    }
+    
+    // BFS to find components
+    const visited = new Set<number>()
+    const nodeToComponent = new Map<number, number>()
+    const componentSizes = new Map<number, number>()
+    let componentId = 0
+    
+    for (let node = 0; node < numNodes; node++) {
+      if (visited.has(node)) continue
+      
+      // BFS from this node
+      const queue = [node]
+      const componentNodes: number[] = []
+      visited.add(node)
+      
+      while (queue.length > 0) {
+        const current = queue.shift()!
+        componentNodes.push(current)
+        
+        const neighbors = adj.get(current)
+        if (neighbors) {
+          for (const neighbor of neighbors) {
+            if (!visited.has(neighbor)) {
+              visited.add(neighbor)
+              queue.push(neighbor)
+            }
+          }
+        }
+      }
+      
+      // Assign component ID and size
+      const size = componentNodes.length
+      for (const n of componentNodes) {
+        nodeToComponent.set(n, componentId)
+      }
+      componentSizes.set(componentId, size)
+      componentId++
+    }
+    
+    // Return map of node -> component size
+    const result = new Map<number, number>()
+    for (let node = 0; node < numNodes; node++) {
+      const compId = nodeToComponent.get(node)
+      const size = compId !== undefined ? componentSizes.get(compId) || 0 : 0
+      result.set(node, size)
+    }
+    return result
+  }
+
+  function applyFiltering(): void {
+    if (!originalLinks) {
+      applyColoring()
+      graph.render()
+      return
+    }
+    
+    const numNodes = Math.floor(pointPositions.length / 2)
+    
+    // Find connected components in the original graph
+    const nodeToComponentSize = findConnectedComponents(numNodes, originalLinks)
+    
+    // Filter edges: keep only edges where both nodes are in large enough components
+    const filteredEdges: number[] = []
+    for (let i = 0; i < originalLinks.length; i += 2) {
+      const src = Math.floor(originalLinks[i])
+      const dst = Math.floor(originalLinks[i + 1])
+      const srcSize = nodeToComponentSize.get(src) || 0
+      const dstSize = nodeToComponentSize.get(dst) || 0
+      
+      if (srcSize >= minAttractorSize && dstSize >= minAttractorSize) {
+        filteredEdges.push(originalLinks[i], originalLinks[i + 1])
+      }
+    }
+    
+    const newLinks = new Float32Array(filteredEdges)
+    graph.setLinks(newLinks)
+    
+    // Update colors to hide filtered nodes
+    applyColoringWithFilter(nodeToComponentSize)
+    graph.render()
+  }
+
+  function applyColoringWithFilter(nodeToComponentSize: Map<number, number>): void {
+    const N = Math.floor(pointPositions.length / 2)
+    const darkBase = rgba('#00ff00ff')
+    const lightBase = rgba('#000000ff')
+    
+    if (colorByPT && ptColors) {
+      const filtered = new Float32Array(ptColors)
+      for (let i = 0; i < N; i++) {
+        const size = nodeToComponentSize.get(i) || 0
+        if (size < minAttractorSize) {
+          filtered[i * 4 + 3] = 0
+        }
+      }
+      // @ts-ignore
+      if (typeof (graph as any).setPointColors === 'function') {
+        // @ts-ignore
+        ;(graph as any).setPointColors(filtered)
+      }
+    } else {
+      const base = isDark ? darkBase : lightBase
+      uniformColors = makeUniformColors(N, base)
+      for (let i = 0; i < N; i++) {
+        const size = nodeToComponentSize.get(i) || 0
+        if (size < minAttractorSize) {
+          uniformColors[i * 4 + 3] = 0
+        }
+      }
+      // @ts-ignore
+      if (typeof (graph as any).setPointColors === 'function') {
+        // @ts-ignore
+        ;(graph as any).setPointColors(uniformColors)
+      }
+    }
+  }
+
   // --- Overlay panel for node names ---
   const namesPanel = document.createElement('div')
   namesPanel.className = 'names-panel'
@@ -61,11 +352,11 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   // --- Create Graph ---
   const graph = new Graph(graphDiv, {
     spaceSize: 8192,
-    backgroundColor: '#ffffffff',
-    pointSize: 6,
-    pointColor: '#000000ff',
-    linkWidth: 0.2,
-    linkColor: '#43434334',
+    backgroundColor: '#0D1117ff',
+    pointSize: 14,
+    pointColor: '#00ff00ff',
+    linkWidth: 0.4,
+    linkColor: '#6b728033',
     linkArrows: true,
     scalePointsOnZoom: true,
     linkGreyoutOpacity: 0,
@@ -99,12 +390,39 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   })
 
   // --- Load edges and positions ---
-  const { links, pointPositions, meta } = await loadCosmographData(
-    '/data/mm10_merged/',
-    'mm10_merged_pkn'
-  )
+  // Load STG output converted to Cosmograph binaries
+  // To generate these, run:
+  //   python src/convert_graph_to_binary_pairs.py --input /absolute/path/to/stg_graph.graphml
+  const { links, pointPositions, meta } = await loadCosmographData('/data/mm10_merged/', 'stg_graph')
+  originalLinks = links
   graph.setPointPositions(pointPositions)
   graph.setLinks(links)
+  // Ensure simulation runs at least once to bring points into view
+  try { graph.start() } catch {}
+
+  // If pseudotime is present, color points accordingly
+  const pt: Array<number | null> | undefined = meta.pseudotime_norm || meta.pseudotime || undefined
+  if (pt && Array.isArray(pt)) {
+    const N = Math.floor(pointPositions.length / 2)
+    const colors = new Float32Array((pt.length || N) * 4)
+    const n = pt.length
+    for (let i = 0; i < n; i++) {
+      const tNorm = pt[i] == null ? null : Math.max(0, Math.min(1, Number(pt[i])))
+      // Use bright yellow for missing pseudotime to ensure visibility on dark bg
+      const [r, g, b, a] = tNorm == null ? [255, 220, 40, 255] : lerpBlueRed(tNorm)
+      const o = i * 4
+      colors[o] = r / 255
+      colors[o + 1] = g / 255
+      colors[o + 2] = b / 255
+      colors[o + 3] = a / 255
+    }
+    ptColors = colors
+    applyColoring()
+  }
+  else {
+    // No pseudotime; default to uniform according to theme
+    applyColoring()
+  }
   graph.fitView()
   graph.render()
 
@@ -115,9 +433,11 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
       return
     }
 
-    const shown = indices
-      .slice(0, 50)
-      .map(i => meta.names?.[i] ?? `node_${i}`)
+    const shown = indices.slice(0, 50).map(i => {
+      const name = meta.names?.[i] ?? `node_${i}`
+      const ptVal = (meta.pseudotime_raw?.[i] ?? meta.pseudotime?.[i] ?? meta.pseudotime_norm?.[i])
+      return ptVal == null ? `${name}` : `${name} (pt=${Number(ptVal).toFixed(3)})`
+    })
     namesPanel.innerHTML = `
       <b>Selected ${indices.length} nodes</b><br>
       ${shown.join(', ')}${indices.length > 50 ? ', …' : ''}
@@ -146,8 +466,11 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
 
   pauseButton.addEventListener('click', () => (isPaused ? unpause() : pause()))
 
+  // Some event hooks may not be in the published TS types
+  // @ts-ignore
   graph.setConfig({
     onSimulationEnd: (): void => pause(),
+    // @ts-ignore
     onSelectionChange: (indices: number[]): void => updateSelectedNames(indices),
   })
 
@@ -192,7 +515,13 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
       [left, top],
       [right, bottom],
     ])
-    updateSelectedNames(graph.getSelectedPointsIndices())
+    // Use the public getter name if available
+    // @ts-ignore
+    const sel = typeof (graph as any).getSelectedIndices === 'function'
+      ? (graph as any).getSelectedIndices()
+      : // @ts-ignore legacy name
+        (graph as any).getSelectedPointsIndices?.() ?? []
+    updateSelectedNames(sel)
   }
 
   const buttons = [
@@ -218,3 +547,15 @@ graphmlViewer().then(({ div }) => {
   document.body.innerHTML = ''
   document.body.appendChild(div)
 })
+
+// --- Helpers ---
+function lerpBlueRed(t: number): [number, number, number, number] {
+  // Simple blue (low) -> red (high) gradient via RGB interpolation
+  // low: #377eb8 (55,126,184), high: #e41a1c (228,26,28)
+  const lb = [55, 126, 184]
+  const hb = [228, 26, 28]
+  const r = Math.round(lb[0] + (hb[0] - lb[0]) * t)
+  const g = Math.round(lb[1] + (hb[1] - lb[1]) * t)
+  const b = Math.round(lb[2] + (hb[2] - lb[2]) * t)
+  return [r, g, b, 255]
+}

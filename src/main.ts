@@ -89,8 +89,10 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   sizeInput.addEventListener('input', () => {
     const v = Number(sizeInput.value)
     sizeValue.textContent = String(v)
+    currentPointSize = v
     graph.setConfig({ pointSize: v })
-    graph.render()
+    applyAttractorSizes()
+    renderGraph()
   })
   sizeControl.appendChild(sizeLabel)
   sizeControl.appendChild(sizeInput)
@@ -108,10 +110,32 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   let minAttractorSize = 0
   let showTrajectoryEdges = true
   let showSimilarityEdges = true
-  let linkWidth = 0.4
+  let linkWidth = 3.4
+  let linkOpacity = 0.2
   type ColorMode = 'pseudotime' | 'condition_bias' | 'uniform'
   let colorMode: ColorMode = 'pseudotime'
   let conditionBiasColors: Float32Array | null = null
+  let showAttractorPath = true
+  let currentPathNodes: Set<number> | null = null
+  let adjacencyList: Map<number, number[]> | null = null
+  let currentPathEdges: Set<string> | null = null
+  let baseLinks: Float32Array | null = null
+  let filteredLinks: Float32Array | null = null
+  let isPaused = false
+  let isUpdatingPathSelection = false
+  let nodeComponentSizeMap: Map<number, number> | null = null
+  let attractorSizeMultiplier = 2.0
+  let attractorNodeSet: Set<number> = new Set()
+  let currentPointSize = 14
+  let pointSizes: Float32Array | null = null
+
+  function renderGraph(): void {
+    graph.render()
+    // Ensure pause state is preserved after render
+    if (isPaused) {
+      graph.pause()
+    }
+  }
 
   function rgba(hex: string): [number, number, number, number] {
     // '#RRGGBBAA' or '#RRGGBB'
@@ -151,7 +175,8 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     }
     // Re-apply colors to respect theme if using uniform colors
     applyColoring()
-    graph.render()
+    applyEdgeFiltering()
+    renderGraph()
   }
 
   function applyColoring(): void {
@@ -160,21 +185,68 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     const lightBase = rgba('#000000ff') // black on light
     
     if (colorMode === 'pseudotime' && ptColors) {
+      const colors = new Float32Array(ptColors)
+      // Apply both path highlighting and component filtering
+      for (let i = 0; i < N; i++) {
+        // First check if node is filtered by component size
+        if (nodeComponentSizeMap) {
+          const size = nodeComponentSizeMap.get(i) || 0
+          if (size < minAttractorSize) {
+            colors[i * 4 + 3] = 0 // Hide filtered nodes completely
+            continue
+          }
+        }
+        // Then apply path highlighting
+        if (showAttractorPath && currentPathNodes && !currentPathNodes.has(i)) {
+          colors[i * 4 + 3] *= 0.1 // Reduce alpha to 10%
+        }
+      }
       // @ts-ignore
       if (typeof (graph as any).setPointColors === 'function') {
         // @ts-ignore
-        ;(graph as any).setPointColors(ptColors)
+        ;(graph as any).setPointColors(colors)
       }
     } else if (colorMode === 'condition_bias' && conditionBiasColors) {
+      const colors = new Float32Array(conditionBiasColors)
+      // Apply both path highlighting and component filtering
+      for (let i = 0; i < N; i++) {
+        // First check if node is filtered by component size
+        if (nodeComponentSizeMap) {
+          const size = nodeComponentSizeMap.get(i) || 0
+          if (size < minAttractorSize) {
+            colors[i * 4 + 3] = 0 // Hide filtered nodes completely
+            continue
+          }
+        }
+        // Then apply path highlighting
+        if (showAttractorPath && currentPathNodes && !currentPathNodes.has(i)) {
+          colors[i * 4 + 3] *= 0.1 // Reduce alpha to 10%
+        }
+      }
       // @ts-ignore
       if (typeof (graph as any).setPointColors === 'function') {
         // @ts-ignore
-        ;(graph as any).setPointColors(conditionBiasColors)
+        ;(graph as any).setPointColors(colors)
       }
     } else {
       // Uniform coloring
       const base = isDark ? darkBase : lightBase
       uniformColors = makeUniformColors(N, base)
+      // Apply both path highlighting and component filtering
+      for (let i = 0; i < N; i++) {
+        // First check if node is filtered by component size
+        if (nodeComponentSizeMap) {
+          const size = nodeComponentSizeMap.get(i) || 0
+          if (size < minAttractorSize) {
+            uniformColors[i * 4 + 3] = 0 // Hide filtered nodes completely
+            continue
+          }
+        }
+        // Then apply path highlighting
+        if (showAttractorPath && currentPathNodes && !currentPathNodes.has(i)) {
+          uniformColors[i * 4 + 3] *= 0.1 // Reduce alpha to 10%
+        }
+      }
       // @ts-ignore
       if (typeof (graph as any).setPointColors === 'function') {
         // @ts-ignore
@@ -219,7 +291,7 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
       if (radio.checked) {
         colorMode = mode.value
         applyColoring()
-        graph.render()
+        renderGraph()
       }
     })
     
@@ -258,24 +330,193 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   const linkWidthInput = document.createElement('input')
   linkWidthInput.type = 'range'
   linkWidthInput.min = '0.1'
-  linkWidthInput.max = '5'
+  linkWidthInput.max = '10'
   linkWidthInput.step = '0.1'
-  linkWidthInput.value = '0.4'
+  linkWidthInput.value = '3.4'
   linkWidthInput.style.verticalAlign = 'middle'
   const linkWidthValue = document.createElement('span')
-  linkWidthValue.textContent = '0.4'
+  linkWidthValue.textContent = '3.4'
   linkWidthValue.style.marginLeft = '8px'
   linkWidthInput.addEventListener('input', () => {
     const v = Number(linkWidthInput.value)
     linkWidthValue.textContent = v.toFixed(1)
     linkWidth = v
     graph.setConfig({ linkWidth: v })
-    graph.render()
+    renderGraph()
   })
   linkWidthCtl.appendChild(linkWidthLabel)
   linkWidthCtl.appendChild(linkWidthInput)
   linkWidthCtl.appendChild(linkWidthValue)
   actionsDiv.appendChild(linkWidthCtl)
+
+  // --- Link opacity control ---
+  const linkOpacityCtl = document.createElement('div')
+  linkOpacityCtl.className = 'action'
+  const linkOpacityLabel = document.createElement('label')
+  linkOpacityLabel.textContent = 'Link opacity'
+  linkOpacityLabel.style.marginRight = '8px'
+  const linkOpacityInput = document.createElement('input')
+  linkOpacityInput.type = 'range'
+  linkOpacityInput.min = '0'
+  linkOpacityInput.max = '1'
+  linkOpacityInput.step = '0.05'
+  linkOpacityInput.value = '0.2'
+  linkOpacityInput.style.verticalAlign = 'middle'
+  const linkOpacityValue = document.createElement('span')
+  linkOpacityValue.textContent = '0.20'
+  linkOpacityValue.style.marginLeft = '8px'
+  linkOpacityInput.addEventListener('input', () => {
+    const v = Number(linkOpacityInput.value)
+    linkOpacityValue.textContent = v.toFixed(2)
+    linkOpacity = v
+    // Convert opacity to hex (0-255)
+    const alphaHex = Math.round(v * 255).toString(16).padStart(2, '0')
+    const linkColor = isDark ? `#6b7280${alphaHex}` : `#434343${alphaHex}`
+    graph.setConfig({ linkColor })
+    renderGraph()
+  })
+  linkOpacityCtl.appendChild(linkOpacityLabel)
+  linkOpacityCtl.appendChild(linkOpacityInput)
+  linkOpacityCtl.appendChild(linkOpacityValue)
+  actionsDiv.appendChild(linkOpacityCtl)
+
+  // --- Simulation controls ---
+  const simHeader = document.createElement('div')
+  simHeader.textContent = 'Simulation'
+  simHeader.style.fontWeight = 'bold'
+  simHeader.style.marginTop = '12px'
+  simHeader.style.marginBottom = '4px'
+  actionsDiv.appendChild(simHeader)
+
+  // Link spring
+  const springCtl = document.createElement('div')
+  springCtl.className = 'action'
+  const springLabel = document.createElement('label')
+  springLabel.textContent = 'Link spring'
+  springLabel.style.marginRight = '8px'
+  const springInput = document.createElement('input')
+  springInput.type = 'range'
+  springInput.min = '0'
+  springInput.max = '5'
+  springInput.step = '0.1'
+  springInput.value = '0.1'
+  springInput.style.verticalAlign = 'middle'
+  const springValue = document.createElement('span')
+  springValue.textContent = '0.1'
+  springValue.style.marginLeft = '8px'
+  springInput.addEventListener('input', () => {
+    const v = Number(springInput.value)
+    springValue.textContent = v.toFixed(1)
+    graph.setConfig({ simulationLinkSpring: v })
+  })
+  springCtl.appendChild(springLabel)
+  springCtl.appendChild(springInput)
+  springCtl.appendChild(springValue)
+  actionsDiv.appendChild(springCtl)
+
+  // Repulsion
+  const repulsionCtl = document.createElement('div')
+  repulsionCtl.className = 'action'
+  const repulsionLabel = document.createElement('label')
+  repulsionLabel.textContent = 'Repulsion'
+  repulsionLabel.style.marginRight = '8px'
+  const repulsionInput = document.createElement('input')
+  repulsionInput.type = 'range'
+  repulsionInput.min = '0'
+  repulsionInput.max = '20'
+  repulsionInput.step = '0.5'
+  repulsionInput.value = '13.5'
+  repulsionInput.style.verticalAlign = 'middle'
+  const repulsionValue = document.createElement('span')
+  repulsionValue.textContent = '13.5'
+  repulsionValue.style.marginLeft = '8px'
+  repulsionInput.addEventListener('input', () => {
+    const v = Number(repulsionInput.value)
+    repulsionValue.textContent = v.toFixed(1)
+    graph.setConfig({ simulationRepulsion: v })
+  })
+  repulsionCtl.appendChild(repulsionLabel)
+  repulsionCtl.appendChild(repulsionInput)
+  repulsionCtl.appendChild(repulsionValue)
+  actionsDiv.appendChild(repulsionCtl)
+
+  // Gravity
+  const gravityCtl = document.createElement('div')
+  gravityCtl.className = 'action'
+  const gravityLabel = document.createElement('label')
+  gravityLabel.textContent = 'Gravity'
+  gravityLabel.style.marginRight = '8px'
+  const gravityInput = document.createElement('input')
+  gravityInput.type = 'range'
+  gravityInput.min = '0'
+  gravityInput.max = '1'
+  gravityInput.step = '0.05'
+  gravityInput.value = '0.1'
+  gravityInput.style.verticalAlign = 'middle'
+  const gravityValue = document.createElement('span')
+  gravityValue.textContent = '0.1'
+  gravityValue.style.marginLeft = '8px'
+  gravityInput.addEventListener('input', () => {
+    const v = Number(gravityInput.value)
+    gravityValue.textContent = v.toFixed(2)
+    graph.setConfig({ simulationGravity: v })
+  })
+  gravityCtl.appendChild(gravityLabel)
+  gravityCtl.appendChild(gravityInput)
+  gravityCtl.appendChild(gravityValue)
+  actionsDiv.appendChild(gravityCtl)
+
+  // Friction
+  const frictionCtl = document.createElement('div')
+  frictionCtl.className = 'action'
+  const frictionLabel = document.createElement('label')
+  frictionLabel.textContent = 'Friction'
+  frictionLabel.style.marginRight = '8px'
+  const frictionInput = document.createElement('input')
+  frictionInput.type = 'range'
+  frictionInput.min = '0'
+  frictionInput.max = '1'
+  frictionInput.step = '0.05'
+  frictionInput.value = '0.8'
+  frictionInput.style.verticalAlign = 'middle'
+  const frictionValue = document.createElement('span')
+  frictionValue.textContent = '0.8'
+  frictionValue.style.marginLeft = '8px'
+  frictionInput.addEventListener('input', () => {
+    const v = Number(frictionInput.value)
+    frictionValue.textContent = v.toFixed(2)
+    graph.setConfig({ simulationFriction: v })
+  })
+  frictionCtl.appendChild(frictionLabel)
+  frictionCtl.appendChild(frictionInput)
+  frictionCtl.appendChild(frictionValue)
+  actionsDiv.appendChild(frictionCtl)
+
+  // Center
+  const centerCtl = document.createElement('div')
+  centerCtl.className = 'action'
+  const centerLabel = document.createElement('label')
+  centerLabel.textContent = 'Center force'
+  centerLabel.style.marginRight = '8px'
+  const centerInput = document.createElement('input')
+  centerInput.type = 'range'
+  centerInput.min = '0'
+  centerInput.max = '1'
+  centerInput.step = '0.05'
+  centerInput.value = '0.5'
+  centerInput.style.verticalAlign = 'middle'
+  const centerValue = document.createElement('span')
+  centerValue.textContent = '0.5'
+  centerValue.style.marginLeft = '8px'
+  centerInput.addEventListener('input', () => {
+    const v = Number(centerInput.value)
+    centerValue.textContent = v.toFixed(2)
+    graph.setConfig({ simulationCenter: v })
+  })
+  centerCtl.appendChild(centerLabel)
+  centerCtl.appendChild(centerInput)
+  centerCtl.appendChild(centerValue)
+  actionsDiv.appendChild(centerCtl)
 
   // --- Toggle edge types ---
   const trajEdgeCtl = document.createElement('div')
@@ -314,6 +555,34 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   simEdgeCtl.appendChild(simEdgeLbl)
   actionsDiv.appendChild(simEdgeCtl)
 
+  // --- Toggle attractor path highlighting ---
+  const pathCtl = document.createElement('div')
+  pathCtl.className = 'action'
+  const pathChk = document.createElement('input')
+  pathChk.type = 'checkbox'
+  pathChk.checked = true
+  pathChk.id = 'show-attractor-path'
+  const pathLbl = document.createElement('label')
+  pathLbl.htmlFor = 'show-attractor-path'
+  pathLbl.textContent = 'Highlight path to attractor'
+  pathLbl.style.marginLeft = '8px'
+  pathChk.addEventListener('change', () => {
+    showAttractorPath = pathChk.checked
+    if (!showAttractorPath) {
+      currentPathNodes = null
+    }
+    // Re-trigger selection update to apply path highlighting
+    // @ts-ignore
+    const sel = typeof (graph as any).getSelectedIndices === 'function'
+      ? (graph as any).getSelectedIndices()
+      : // @ts-ignore legacy name
+        (graph as any).getSelectedPointsIndices?.() ?? []
+    updateSelectedNames(sel)
+  })
+  pathCtl.appendChild(pathChk)
+  pathCtl.appendChild(pathLbl)
+  actionsDiv.appendChild(pathCtl)
+
   // --- Filter by attractor size ---
   const filterCtl = document.createElement('div')
   filterCtl.className = 'action'
@@ -340,6 +609,34 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   filterCtl.appendChild(filterInput)
   filterCtl.appendChild(filterValue)
   actionsDiv.appendChild(filterCtl)
+
+  // --- Attractor size multiplier control ---
+  const attractorSizeCtl = document.createElement('div')
+  attractorSizeCtl.className = 'action'
+  const attractorSizeLabel = document.createElement('label')
+  attractorSizeLabel.textContent = 'Attractor size multiplier'
+  attractorSizeLabel.style.marginRight = '8px'
+  const attractorSizeInput = document.createElement('input')
+  attractorSizeInput.type = 'range'
+  attractorSizeInput.min = '1'
+  attractorSizeInput.max = '5'
+  attractorSizeInput.value = '2'
+  attractorSizeInput.step = '0.1'
+  attractorSizeInput.style.verticalAlign = 'middle'
+  const attractorSizeValue = document.createElement('span')
+  attractorSizeValue.textContent = '2.0'
+  attractorSizeValue.style.marginLeft = '8px'
+  attractorSizeInput.addEventListener('input', () => {
+    const v = Number(attractorSizeInput.value)
+    attractorSizeValue.textContent = v.toFixed(1)
+    attractorSizeMultiplier = v
+    applyAttractorSizes()
+    renderGraph()
+  })
+  attractorSizeCtl.appendChild(attractorSizeLabel)
+  attractorSizeCtl.appendChild(attractorSizeInput)
+  attractorSizeCtl.appendChild(attractorSizeValue)
+  actionsDiv.appendChild(attractorSizeCtl)
 
   function findConnectedComponents(numNodes: number, edgeList: Float32Array): Map<number, number> {
     // Build adjacency list (undirected for component analysis)
@@ -401,10 +698,125 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     return result
   }
 
+  function buildAdjacencyList(): void {
+    if (!originalLinks) return
+    
+    // Build directed adjacency list from trajectory edges only
+    adjacencyList = new Map<number, number[]>()
+    const edgesToUse = trajectoryLinks || originalLinks
+    
+    for (let i = 0; i < edgesToUse.length; i += 2) {
+      const src = Math.floor(edgesToUse[i])
+      const dst = Math.floor(edgesToUse[i + 1])
+      if (!adjacencyList.has(src)) {
+        adjacencyList.set(src, [])
+      }
+      adjacencyList.get(src)!.push(dst)
+    }
+    console.log('Built adjacency list with', adjacencyList.size, 'source nodes')
+  }
+
+  function identifyAttractorsAndApplySizes(): void {
+    if (!adjacencyList || !pointPositions) return
+    
+    const numNodes = Math.floor(pointPositions.length / 2)
+    attractorNodeSet.clear()
+    
+    // Identify attractors: nodes with no outgoing edges
+    for (let i = 0; i < numNodes; i++) {
+      const outgoing = adjacencyList.get(i)
+      if (!outgoing || outgoing.length === 0) {
+        attractorNodeSet.add(i)
+      }
+    }
+    
+    console.log(`Identified ${attractorNodeSet.size} attractors`)
+    applyAttractorSizes()
+  }
+  
+  function applyAttractorSizes(): void {
+    if (!pointPositions) return
+    
+    const numNodes = Math.floor(pointPositions.length / 2)
+    
+    // Check if Cosmograph supports setPointSizes
+    if (typeof (graph as any).setPointSizes === 'function') {
+      const sizes = new Float32Array(numNodes)
+      for (let i = 0; i < numNodes; i++) {
+        sizes[i] = attractorNodeSet.has(i) ? currentPointSize * attractorSizeMultiplier : currentPointSize
+      }
+      pointSizes = sizes
+      ;(graph as any).setPointSizes(sizes)
+    }
+  }
+  
+  function findPathToAttractor(startNode: number): number[] {
+    if (!adjacencyList) {
+      buildAdjacencyList()
+    }
+    if (!adjacencyList) return [startNode]
+    
+    const path: number[] = [startNode]
+    const visited = new Set<number>([startNode])
+    let current = startNode
+    
+    // Follow the directed edges until we reach a node with no outgoing edges (attractor)
+    // or we hit a cycle
+    while (true) {
+      const neighbors = adjacencyList.get(current)
+      if (!neighbors || neighbors.length === 0) {
+        // Reached an attractor (no outgoing edges)
+        break
+      }
+      
+      // Take the first outgoing edge (for multiple edges, could use other logic)
+      const next = neighbors[0]
+      
+      if (visited.has(next)) {
+        // Hit a cycle - the cycle itself is the attractor
+        break
+      }
+      
+      path.push(next)
+      visited.add(next)
+      current = next
+    }
+    
+    return path
+  }
+
+  function applyEdgeFiltering(): void {
+    if (!baseLinks) return
+    
+    // Use filtered links if component filtering is active, otherwise use base links
+    const linksToUse = filteredLinks || baseLinks
+    graph.setLinks(linksToUse)
+    
+    if (showAttractorPath && currentPathEdges && currentPathEdges.size > 0) {
+      // Increase edge visibility significantly so path edges (connecting bright nodes) are clearly visible
+      // But make non-selected edges very faint
+      graph.setConfig({ 
+        linkWidth: linkWidth * 3,
+        linkColor: isDark ? '#6b7280aa' : '#434343aa', // Much more opaque
+        linkGreyoutOpacity: 0.05 // Very faint for non-path edges
+      })
+      
+      console.log(`Path highlighting active with ${currentPathEdges.size} edges in path`)
+    } else {
+      // Normal edge styling
+      graph.setConfig({ 
+        linkWidth: linkWidth,
+        linkColor: isDark ? '#6b728033' : '#43434334',
+        linkGreyoutOpacity: 0.5 // Normal visibility when not highlighting path
+      })
+    }
+  }
+
   function applyFiltering(): void {
     if (!originalLinks) {
       applyColoring()
-      graph.render()
+      applyEdgeFiltering()
+      renderGraph()
       return
     }
     
@@ -413,23 +825,53 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     // Build edge list based on user toggles
     let activeEdges = originalLinks
     if (trajectoryLinks && similarityLinks) {
+      // Use a Set to deduplicate edges
+      const edgeSet = new Set<string>()
       const combined: number[] = []
+      
       if (showTrajectoryEdges) {
-        for (let i = 0; i < trajectoryLinks.length; i++) {
-          combined.push(trajectoryLinks[i])
+        for (let i = 0; i < trajectoryLinks.length; i += 2) {
+          const src = trajectoryLinks[i]
+          const dst = trajectoryLinks[i + 1]
+          const key = `${src}-${dst}`
+          if (!edgeSet.has(key)) {
+            edgeSet.add(key)
+            combined.push(src, dst)
+          }
         }
       }
       if (showSimilarityEdges) {
-        for (let i = 0; i < similarityLinks.length; i++) {
-          combined.push(similarityLinks[i])
+        for (let i = 0; i < similarityLinks.length; i += 2) {
+          const src = similarityLinks[i]
+          const dst = similarityLinks[i + 1]
+          const key = `${src}-${dst}`
+          if (!edgeSet.has(key)) {
+            edgeSet.add(key)
+            combined.push(src, dst)
+          }
         }
       }
       activeEdges = new Float32Array(combined)
-      console.log(`Active edges: ${activeEdges.length / 2} (traj: ${showTrajectoryEdges ? trajectoryLinks.length / 2 : 0}, sim: ${showSimilarityEdges ? similarityLinks.length / 2 : 0})`)
+      console.log(`Active edges: ${activeEdges.length / 2} (traj: ${showTrajectoryEdges ? trajectoryLinks.length / 2 : 0}, sim: ${showSimilarityEdges ? similarityLinks.length / 2 : 0}, deduped: ${edgeSet.size})`)
+    }
+    
+    // Update baseLinks with the active edge set (before component filtering)
+    baseLinks = activeEdges
+    
+    // If min component size is 1 (no filtering), clear filteredLinks
+    if (minAttractorSize <= 1) {
+      filteredLinks = null
+      nodeComponentSizeMap = null
+      graph.setLinks(baseLinks)
+      applyColoring()
+      applyEdgeFiltering()
+      renderGraph()
+      return
     }
     
     // Find connected components in the active graph
     const nodeToComponentSize = findConnectedComponents(numNodes, activeEdges)
+    nodeComponentSizeMap = nodeToComponentSize
     
     // Filter edges: keep only edges where both nodes are in large enough components
     const filteredEdges: number[] = []
@@ -445,11 +887,13 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     }
     
     const newLinks = new Float32Array(filteredEdges)
+    filteredLinks = newLinks
     graph.setLinks(newLinks)
     
     // Update colors to hide filtered nodes
     applyColoringWithFilter(nodeToComponentSize)
-    graph.render()
+    applyEdgeFiltering()
+    renderGraph()
   }
 
   function applyColoringWithFilter(nodeToComponentSize: Map<number, number>): void {
@@ -512,11 +956,11 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     backgroundColor: '#0D1117ff',
     pointSize: 14,
     pointColor: '#00ff00ff',
-    linkWidth: 0.4,
+    linkWidth: 3.4,
     linkColor: '#6b728033',
     linkArrows: true,
     scalePointsOnZoom: true,
-    linkGreyoutOpacity: 0,
+    linkGreyoutOpacity: 0.5,
     curvedLinks: true,
     renderHoveredPointRing: true,
     hoveredPointRingColor: '#4B5BBF',
@@ -524,17 +968,31 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     enableRightClickRepulsion: true,
     simulationRepulsionFromMouse: 5,
     simulationLinkDistance: 2,
-    simulationLinkSpring: 2,
-    simulationRepulsion: 10,
+    simulationLinkSpring: 0.1,
+    simulationRepulsion: 13.5,
     simulationCenter: 0.5,
-    simulationGravity: 0.2,
-    simulationFriction: 0.1,
+    simulationGravity: 0.1,
+    simulationFriction: 0.8,
     simulationCluster: 1,
     simulationDecay: 100000,
     onPointClick: (index: number): void => {
+      // Prevent selection of filtered nodes
+      if (nodeComponentSizeMap) {
+        const size = nodeComponentSizeMap.get(index) || 0
+        if (size < minAttractorSize) {
+          console.log(`Ignoring click on filtered node ${index} (component size: ${size})`)
+          return
+        }
+      }
+      
+      const wasPaused = isPaused
       graph.selectPointByIndex(index)
       graph.zoomToPointByIndex(index)
       updateSelectedNames([index])
+      // If simulation was paused before click, keep it paused
+      if (wasPaused) {
+        graph.pause()
+      }
       console.log('Clicked point index:', index)
     },
     onBackgroundClick: (): void => {
@@ -562,6 +1020,11 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   
   graph.setPointPositions(pointPositions)
   graph.setLinks(links)
+  baseLinks = links
+  // Build adjacency list for path finding
+  buildAdjacencyList()
+  // Identify attractors and apply size variations
+  identifyAttractorsAndApplySizes()
   // Ensure simulation runs at least once to bring points into view
   try { graph.start() } catch {}
 
@@ -605,28 +1068,89 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   
   applyColoring()
   graph.fitView()
-  graph.render()
+  renderGraph()
 
   // --- Function to update node name panel ---
   function updateSelectedNames(indices: number[]): void {
+    // Prevent recursive updates when we're selecting path nodes
+    if (isUpdatingPathSelection) return
+    
     if (!indices.length) {
       namesPanel.textContent = 'No selection'
+      currentPathNodes = null
+      currentPathEdges = null
+      if (showAttractorPath) {
+        applyColoring()
+        applyEdgeFiltering()
+        renderGraph()
+      }
       return
     }
 
     const shown = indices.slice(0, 50).map(i => {
       const name = meta.names?.[i] ?? `node_${i}`
       const ptVal = (meta.pseudotime_raw?.[i] ?? meta.pseudotime?.[i] ?? meta.pseudotime_norm?.[i])
-      return ptVal == null ? `${name}` : `${name} (pt=${Number(ptVal).toFixed(3)})`
+      const ptStr = ptVal == null ? '' : ` (pt=${Number(ptVal).toFixed(3)})`
+      return `ID: ${i}, ${name}${ptStr}`
     })
+    
+    let pathInfo = ''
+    if (showAttractorPath && indices.length === 1 && !isUpdatingPathSelection) {
+      const path = findPathToAttractor(indices[0])
+      if (path.length > 1) {
+        const attractorId = path[path.length - 1]
+        const attractorName = meta.names?.[attractorId] ?? `node_${attractorId}`
+        pathInfo = `<br><span style="color: #4B5BBF;">Path to attractor ${attractorName} (ID: ${attractorId}): ${path.length} nodes</span>`
+        currentPathNodes = new Set(path)
+        
+        // Build set of edges in the path
+        currentPathEdges = new Set()
+        for (let i = 0; i < path.length - 1; i++) {
+          const edgeKey = `${path[i]}-${path[i + 1]}`
+          currentPathEdges.add(edgeKey)
+        }
+        
+        // Select ALL nodes in the path so edges between them are highlighted
+        isUpdatingPathSelection = true
+        graph.unselectPoints()
+        // @ts-ignore - selectPointsByIndices might not be in types
+        if (typeof graph.selectPointsByIndices === 'function') {
+          // @ts-ignore
+          graph.selectPointsByIndices(path)
+        } else {
+          // Fallback: select one by one
+          for (const nodeId of path) {
+            graph.selectPointByIndex(nodeId, true, false)
+          }
+        }
+        isUpdatingPathSelection = false
+        
+        applyColoring()
+        applyEdgeFiltering()
+        renderGraph()
+      } else {
+        pathInfo = '<br><span style="color: #999;">Node is an attractor (no outgoing edges)</span>'
+        currentPathNodes = new Set([indices[0]])
+        currentPathEdges = null
+        applyColoring()
+        applyEdgeFiltering()
+        renderGraph()
+      }
+    } else if (showAttractorPath) {
+      currentPathNodes = null
+      currentPathEdges = null
+      applyColoring()
+      applyEdgeFiltering()
+      renderGraph()
+    }
+    
     namesPanel.innerHTML = `
-      <b>Selected ${indices.length} nodes</b><br>
-      ${shown.join(', ')}${indices.length > 50 ? ', …' : ''}
+      <b>Selected ${indices.length} node${indices.length > 1 ? 's' : ''}</b><br>
+      ${shown.join(', ')}${indices.length > 50 ? ', …' : ''}${pathInfo}
     `
   }
 
   // --- UI Actions ---
-  let isPaused = false
   const pauseButton = document.createElement('div')
   pauseButton.className = 'action'
   pauseButton.textContent = 'Pause'
@@ -650,7 +1174,6 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
   // Some event hooks may not be in the published TS types
   // @ts-ignore
   graph.setConfig({
-    onSimulationEnd: (): void => pause(),
     // @ts-ignore
     onSelectionChange: (indices: number[]): void => updateSelectedNames(indices),
   })
@@ -673,7 +1196,6 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     graph.zoomToPointByIndex(pointIndex)
     graph.selectPointByIndex(pointIndex)
     updateSelectedNames([pointIndex])
-    pause()
   }
 
   function selectPoint(): void {
@@ -681,7 +1203,6 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     graph.selectPointByIndex(pointIndex)
     graph.fitView()
     updateSelectedNames([pointIndex])
-    pause()
   }
 
   function selectPointsInArea(): void {
@@ -691,7 +1212,6 @@ export async function graphmlViewer(): Promise<{ graph: Graph; div: HTMLDivEleme
     const right = getRandomInRange([left, (w * 3) / 4])
     const top = getRandomInRange([h / 4, h / 2])
     const bottom = getRandomInRange([top, (h * 3) / 4])
-    pause()
     graph.selectPointsInRect([
       [left, top],
       [right, bottom],
